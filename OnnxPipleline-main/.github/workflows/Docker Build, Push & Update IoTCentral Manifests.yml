@@ -1,0 +1,93 @@
+name: Docker Build, Push & Update IoTCentral Manifests on onnx push
+
+on:
+  push:
+    paths:
+      - 'models/*.onnx'
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: <Your Docker Image Name>
+  IMAGE_VERSION: <Your Docker Image Version>
+  IOT_CENTRAL_API: <Your IoT Central API URL>
+  IOT_CENTRAL_APP_ID: <Your IoT Central Application ID>
+  DEVICE_ID: <Your Device ID>
+  MANIFEST_ID: <your manifest ID>
+  DEVICE_TEMPLATE_ID: <Your Device Template ID>"
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    env:
+      AZURECR_PAT: ${{ secrets.AZURECR_PAT }}
+      IOT_CENTRAL_TOKEN: ${{ secrets.IOT_CENTRAL_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Log in to GitLab Container Registry
+        run: echo "$AZURECR_PAT" | docker login <Your GitLab URL> -u <Your GitLab username> --password-stdin
+
+      - name: Build Docker image
+        run: |
+          docker build -t $IMAGE_NAME:$IMAGE_VERSION .
+          docker tag $IMAGE_NAME:$IMAGE_VERSION $IMAGE_NAME:latest
+
+      - name: Push Docker image
+        run: |
+          docker push $IMAGE_NAME:$IMAGE_VERSION
+          docker push $IMAGE_NAME:latest
+
+      - name: Install dependencies (jq, curl)
+        run: sudo apt-get install -y jq curl
+
+      - name: Get current manifest
+        run: |
+          # Use GET request to retrieve the current IoTCentral manifest using curl and save it to a file named "current_manifest.json" \
+          -H "Authorization: $IOT_CENTRAL_TOKEN" \
+          -H "Content-Type: application/json" \
+          -o current_manifest.json
+        
+
+      - name: Update only onnxmqttinference image and version
+        run: |
+          jq \
+          --arg ver "$IMAGE_VERSION" \
+          --arg img "$IMAGE_NAME" \
+          '.data.modulesContent["$edgeAgent"]["properties.desired"].modules.onnxmqttinference.version = $ver |
+          .data.modulesContent["$edgeAgent"]["properties.desired"].modules.onnxmqttinference.settings.image = ($img + ":" + $ver)' \
+           current_manifest.json > updated_manifest.json
+
+      - name: Print updated manifest (debug)
+        run: cat updated_manifest.json
+
+      - name: Upload updated manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-manifest
+          path: updated_manifest.json
+
+      - name: Download updated manifest artifact
+        uses: actions/download-artifact@v4
+        with:
+         name: updated-manifest  # The name you used for the artifact when uploading it
+         path: ./manifests       # This is the folder where the artifact will be downloaded
+
+      - name: Update deployment manifest in IoT Central
+        run: |
+          # Use PUT request to Update the current manifest with latest docker image using curl and save it to a file named "updated_manifest.json" \
+          -H "Authorization: $IOT_CENTRAL_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data-binary @updated_manifest.json
+
+      - name: Upload Updated Manifest to Edge Device
+        run: |
+          # Use POST request to Upload the updated_manifest.jsonn using curl and save it to a file named "updated_manifest.json\
+          -H "Authorization: $IOT_CENTRAL_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data-binary @updated_manifest.json
+
+      - name: Print Final manifest Updated to IoTCENTRAL
+        run: cat updated_manifest.json
